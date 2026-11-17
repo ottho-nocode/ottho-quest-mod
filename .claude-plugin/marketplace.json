@@ -1,0 +1,5 @@
+{
+  "name": "ottho-quest-mod",
+  "owner": { "name": "Ottho" },
+  "plugins": [{ "name": "ottho-quest", "source": "./" }]
+}

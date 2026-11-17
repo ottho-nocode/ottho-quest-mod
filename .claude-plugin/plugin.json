@@ -1,0 +1,6 @@
+{
+  "name": "ottho-quest",
+  "version": "0.2.0",
+  "description": "Ottho Quest à côté de la conversation : active le jeu dans ton projet avec /quest, ton travail avec Claude et ton activité Academy te font progresser",
+  "types": "./types/index.d.ts"
+}
