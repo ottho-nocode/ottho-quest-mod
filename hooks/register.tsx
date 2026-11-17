@@ -74,6 +74,8 @@ const closedKey = (root: string) => `closed:${root}`
 /** Le travail fait avant la première lecture du compte, encaissé dès qu'il est connu. */
 const PENDING_KEY = 'work-pending'
 const ACCOUNT_KEY = 'account'
+/** La partie tenue sur ce poste tant qu'aucun compte Academy n'a pu être lu. */
+const LOCAL = 'local'
 const saveKey = (account: string) => `save:${account}`
 const sinceKey = (account: string) => `since:${account}`
 
@@ -95,7 +97,7 @@ const C = {
 const NOT_CONNECTED =
   "L'Academy n'est pas branchée sur ce Claude, ou pas dans ce projet. Branche-la depuis Mon IA, puis actualise."
 const NO_ACTIVITY_TOOL =
-  "Ton Claude ne voit pas encore ton activité Academy. Ouvre une nouvelle session pour qu'il charge la mise à jour ; les chantiers marchent déjà."
+  "Ton Claude ne voit pas encore ton activité Academy : ouvre une nouvelle session pour qu'il la charge. En attendant, ton travail ici et tes chantiers comptent déjà."
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'fabrique', label: 'Fabrique' },
@@ -257,8 +259,8 @@ async function runSync($: EngineInterface): Promise<void> {
   await update($, board, (b): Board => ({ ...b, phase: 'loading' }))
   const name = await findServer($)
   if (!name) {
-    await update($, play, (p): Play => ({ ...p, phase: 'error', message: NOT_CONNECTED }))
     await update($, board, (b): Board => ({ ...b, phase: 'error', message: NOT_CONNECTED }))
+    await loadWithoutActivity($, NOT_CONNECTED)
     return
   }
   await Promise.all([syncActivity($, name), syncChantiers($, name)])
@@ -303,15 +305,18 @@ async function syncActivity($: EngineInterface, name: string): Promise<void> {
     const { out, isNew } = await serial(async () => {
       const saved = await $.store.get(saveKey(account))
       const isNew = saved === undefined || saved === null
-      // Première partie sur ce poste : le cadeau de départ, puis l'héritage de
+      // Première partie de ce compte sur ce poste : la partie tenue sans compte
+      // s'il y en a une, sinon le cadeau de départ ; puis l'héritage de
       // l'activité passée, aux pièces plafonnées comme dans le jeu web.
-      const out = isNew
-        ? claim(grantStarter({ ...newGame(), onboarded: true, name: 'Builder' }), events, {
-            coinCap: HERITAGE_COIN_CAP,
-          })
-        : claim(migrateSave(saved), events)
+      const local = isNew ? await $.store.get(saveKey(LOCAL)) : undefined
+      const start =
+        local !== undefined && local !== null
+          ? migrateSave(local)
+          : grantStarter({ ...newGame(), onboarded: true, name: 'Builder' })
+      const out = isNew ? claim(start, events, { coinCap: HERITAGE_COIN_CAP }) : claim(migrateSave(saved), events)
       const state = await claimPending($, out.state)
       await $.store.set(saveKey(account), state)
+      if (local !== undefined && local !== null) await $.store.delete(saveKey(LOCAL))
       await $.store.set(ACCOUNT_KEY, account)
       const newest = events.reduce<string | null>((max, e) => (max === null || e.at > max ? e.at : max), null)
       if (newest) await $.store.set(sinceKey(account), newest)
@@ -327,12 +332,30 @@ async function syncActivity($: EngineInterface, name: string): Promise<void> {
       hasTool('get_my_activity') === false ||
       (error instanceof AcademyError && /get_my_activity|unknown tool|not found|introuvable/i.test(text))
     if (!(error instanceof AcademyError) && hasTool('get_my_activity') !== false) forgetServer()
-    await update($, play, (p): Play => ({
-      ...p,
-      phase: 'error',
-      message: missing ? NO_ACTIVITY_TOOL : `Lecture de ton activité impossible : ${text}`,
-    }))
+    await loadWithoutActivity($, missing ? NO_ACTIVITY_TOOL : `Lecture de ton activité impossible : ${text}`)
   }
+}
+
+/**
+ * L'activité ne se lit pas : la partie se charge quand même, celle du dernier
+ * compte lu sur ce poste ou une partie tenue sans compte, reprise par le
+ * premier compte lu ensuite. Le travail du projet et les chantiers comptent.
+ */
+async function loadWithoutActivity($: EngineInterface, message: string): Promise<void> {
+  const state = await serial(async () => {
+    const known = await $.store.get(ACCOUNT_KEY)
+    const account = typeof known === 'string' ? known : LOCAL
+    const saved = await $.store.get(saveKey(account))
+    const base =
+      saved === undefined || saved === null
+        ? grantStarter({ ...newGame(), onboarded: true, name: 'Builder' })
+        : migrateSave(saved)
+    const next = await claimPending($, base)
+    await $.store.set(saveKey(account), next)
+    await $.store.set(ACCOUNT_KEY, account)
+    return { account, next }
+  })
+  await update($, play, (p): Play => ({ ...p, account: state.account, game: state.next, phase: 'error', message }))
 }
 
 async function syncChantiers($: EngineInterface, name: string): Promise<void> {
@@ -648,7 +671,12 @@ export const register: Register = on => {
         dimColor
         label={p.phase === 'loading' ? 'Lecture en cours' : 'Actualiser'}
         onPress={() => {
-          void syncAll($).catch(() => undefined)
+          void syncAll($)
+            .then(async () => {
+              const after = await read($, play)
+              $.ui.toast(after.phase === 'ready' ? 'Ottho Quest est à jour' : 'Lecture terminée, voir le message')
+            })
+            .catch(() => undefined)
         }}
       />
     )
@@ -823,6 +851,7 @@ export const register: Register = on => {
               </Box>
             ))}
             {p.phase === 'error' && p.message && <Text color={C.danger}>{p.message}</Text>}
+            {p.message === NOT_CONNECTED && <Link href={CONNECT_URL} label="Brancher l'Academy (Mon IA)" />}
           </Box>
         </Box>
       )

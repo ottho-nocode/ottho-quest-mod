@@ -20,6 +20,26 @@ const LIST_TOOL = /^mcp__(.+)__list_my_exercises$/
  */
 const SERVERS = ['ottho-academy', 'claude.ai Ottho-academy', 'claude.ai Ottho Academy', 'claude.ai Ottho academy']
 
+/** Une erreur rendue par l'Academy elle-même (outil inconnu, refus, panne). */
+export class AcademyError extends Error {}
+
+/** Au-delà, un appel à l'Academy compte comme une panne : le panneau le dit au lieu d'attendre. */
+const CALL_TIMEOUT_MS = 20_000
+
+/** Rejette si `work` n'a pas répondu à temps. */
+async function withTimeout<T>($: EngineInterface, work: Promise<T>, what: string): Promise<T> {
+  let done = false
+  const late = $.clock.sleep(CALL_TIMEOUT_MS).then(() => {
+    if (!done) throw new AcademyError(`L'Academy ne répond pas (${what})`)
+    return undefined as never
+  })
+  try {
+    return await Promise.race([work, late])
+  } finally {
+    done = true
+  }
+}
+
 /** Le serveur trouvé, gardé tant que le module tourne. */
 let server: string | null = null
 /** Ses outils tels que la session les montre, par nom court ; `null` : liste inconnue. */
@@ -52,8 +72,8 @@ export async function findServer($: EngineInterface): Promise<string | null> {
     return server
   }
   for (const name of SERVERS) {
-    const found = await $.mcp.connect(name)
-    if (found.isConnected) {
+    const found = await withTimeout($, $.mcp.connect(name), 'connexion').catch(() => ({ isConnected: false as const }))
+    if (found.isConnected && 'server' in found) {
       server = found.server
       return server
     }
@@ -66,8 +86,6 @@ export function hasTool(name: string): boolean | null {
   return tools === null ? null : tools.has(name)
 }
 
-/** Une erreur rendue par l'Academy elle-même (outil inconnu, refus, panne). */
-export class AcademyError extends Error {}
 
 /** Le texte d'un résultat d'outil, tel que le modèle le lit. */
 function resultText(ran: { text?: string; result?: unknown }): string {
@@ -94,13 +112,13 @@ export async function callAcademy(
   let text: string
   let isError: boolean
   try {
-    const result = await $.mcp.call(name, tool, args)
+    const result = await withTimeout($, $.mcp.call(name, tool, args), tool)
     text = result.content.map(block => (block.type === 'text' ? block.text ?? '' : '')).join('')
     isError = result.isError
   } catch (error) {
     const full = tools?.get(tool)
     if (!full) throw error
-    const ran = await $.tool.call({ tool: full, ...args })
+    const ran = await withTimeout($, $.tool.call({ tool: full, ...args }), tool)
     if (typeof ran.deny === 'string') throw new AcademyError(ran.deny)
     text = resultText(ran)
     isError = ran.isError === true

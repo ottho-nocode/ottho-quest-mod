@@ -116,6 +116,8 @@ function setup(on: On, academy: Academy = {}) {
   on('turn.complete', () => ({ text: '' }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('clock.now', () => ({ value: Date.parse('2026-11-13T10:00:00Z') }))
+  // Le délai maximal d'un appel à l'Academy n'arrive jamais : l'Academy du test répond toujours.
+  on('clock.sleep', () => new Promise<never>(() => {}))
   const toasts: string[] = []
   on('ui.toast', (_, e) => {
     toasts.push(e.text)
@@ -348,4 +350,25 @@ test('le panneau montre le projet et le travail du jour', async ($, on) => {
   expect(all).toContain('Demandes à Claude')
   expect(await ui.find({ key: 'pause-projet' })).not.toBe(undefined)
   await ui.unmount()
+})
+
+test("sans activité lisible, la partie démarre sur ce poste, puis le compte la reprend", async ($, on) => {
+  const academy: Academy = { tools: ['list_my_exercises', 'submit_exercise'], missingActivity: true }
+  const { store } = setup(on, academy)
+  on('tool.call', () => written(`${ROOT}/index.html`))
+  await $.command.run(RUN)
+  // Partie tenue sans compte : cadeau de départ, chantiers et travail du projet.
+  expect(store.get('account')).toBe('local')
+  const local = store.get('save:local') as { xp: number; coins: number }
+  expect(local.coins).toBe(50)
+  await $.tool.call({ tool: 'Write', file_path: `${ROOT}/index.html`, content: 'x' })
+  for (let i = 0; i < 50 && (store.get('save:local') as { xp: number }).xp === local.xp; i++) await tick()
+  expect((store.get('save:local') as { xp: number }).xp).toBe(3)
+
+  // L'Academy répond enfin : le compte reprend la partie et y ajoute l'activité.
+  academy.missingActivity = false
+  await $.command.run(RUN)
+  expect(store.get('account')).toBe(ACCOUNT)
+  expect(saved(store).xp).toBe(73)
+  expect(store.has('save:local')).toBe(false)
 })
