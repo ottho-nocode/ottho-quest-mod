@@ -247,7 +247,7 @@ test('la scène de la Fabrique tient dans un SVG, pour chaque builder', async ()
   }
 })
 
-// --- Activation par projet et travail du projet ---
+// --- Interrupteur du jeu et travail du projet ---
 
 const START = { cwd: ROOT, surface: 'desktop', isInteractive: true } as const
 
@@ -267,21 +267,32 @@ function written(path: string) {
   return { result: { type: 'create', filePath: path, content: 'x', structuredPatch: [], originalFile: null } }
 }
 
-test("dans un projet où le jeu n'est pas activé, rien ne s'ouvre et l'Academy n'est pas lue", async ($, on) => {
+test("tant que le jeu n'est pas allumé, rien ne s'ouvre et l'Academy n'est pas lue", async ($, on) => {
   const { asked, opened } = setup(on)
   await $.session.start(START)
   expect(opened).toEqual([])
   expect(asked).toEqual([])
 })
 
-test('/quest active le jeu dans ce projet : la session suivante le rouvre', async ($, on) => {
-  const { opened, store } = setup(on)
+test('/quest allume le jeu partout : une session dans un autre projet le rouvre', async ($, on) => {
+  const academy: Academy = {}
+  const { opened, store } = setup(on, academy)
   const ran = await $.command.run(RUN)
-  expect((ran.text ?? '').includes('activé dans mon-site')).toBe(true)
-  expect(store.get('projects')).toEqual([ROOT])
+  expect((ran.text ?? '').includes('Ottho Quest est allumé')).toBe(true)
+  expect(store.get('enabled')).toBe(true)
   opened.length = 0
+  academy.root = '/Users/eleve/autre-projet'
+  await $.session.start({ ...START, cwd: academy.root })
+  expect(opened).toEqual(['ottho-quest'])
+})
+
+test("l'ancienne activation par projet vaut jeu allumé", async ($, on) => {
+  const { opened, store } = setup(on)
+  store.set('projects', [ROOT])
   await $.session.start(START)
   expect(opened).toEqual(['ottho-quest'])
+  expect(store.get('enabled')).toBe(true)
+  expect(store.has('projects')).toBe(false)
 })
 
 test('un fichier écrit dans le projet rapporte, une fois par fichier et par jour', async ($, on) => {
@@ -297,7 +308,7 @@ test('un fichier écrit dans le projet rapporte, une fois par fichier et par jou
   expect(saved(store).talentXp.design - before.talentXp.design).toBe(3)
 })
 
-test('un commit rapporte ; en pause, le travail du projet ne compte plus', async ($, on) => {
+test('un commit rapporte ; en pause, le travail ne compte plus', async ($, on) => {
   const { store, toasts } = setup(on)
   on('tool.call', () => ({ result: { stdout: '[main 1a2b3c4] Ajoute la page\n 1 file changed', stderr: '', interrupted: false } }))
   await $.command.run(RUN)
@@ -308,7 +319,7 @@ test('un commit rapporte ; en pause, le travail du projet ne compte plus', async
   expect(toasts.includes('Commit encaissé : +8 XP, +3 pièces')).toBe(true)
 
   const paused = await $.command.run({ ...RUN, args: 'pause' })
-  expect((paused.text ?? '').includes('en pause dans mon-site')).toBe(true)
+  expect((paused.text ?? '').includes('Ottho Quest est en pause')).toBe(true)
   await $.tool.call({ tool: 'Bash', command: 'git commit -m "Encore"' })
   await tick()
   expect(saved(store).xp - before).toBe(8)
@@ -330,7 +341,7 @@ test('les demandes à Claude paient jusqu\'au plafond du jour, pas celles d\'un 
 
 test("le travail fait avant la lecture du compte est encaissé ensuite", async ($, on) => {
   const { store } = setup(on)
-  store.set('projects', [ROOT])
+  store.set('enabled', true)
   on('tool.call', () => written(`${ROOT}/README.md`))
   await $.tool.call({ tool: 'Write', file_path: `${ROOT}/README.md`, content: 'x' })
   for (let i = 0; i < 50 && !store.has('work-pending'); i++) await tick()
@@ -346,9 +357,9 @@ test('le panneau montre le projet et le travail du jour', async ($, on) => {
   await $.command.run(RUN)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   const all = await texts(ui)
-  expect(all).toContain('Projet mon-site · ton travail ici compte')
+  expect(all).toContain('Allumé · ton travail dans mon-site compte')
   expect(all).toContain('Demandes à Claude')
-  expect(await ui.find({ key: 'pause-projet' })).not.toBe(undefined)
+  expect(await ui.find({ key: 'pause-jeu' })).not.toBe(undefined)
   await ui.unmount()
 })
 

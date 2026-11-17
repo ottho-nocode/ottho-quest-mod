@@ -1,6 +1,6 @@
 # Ottho Quest
 
-Le jeu Ottho Quest dans Claude Code, dans un panneau à côté de la conversation. Tu l'actives projet par projet : ton travail avec Claude dans ce projet et ton activité à l'Ottho Academy font avancer ton builder.
+Le jeu Ottho Quest dans Claude Code, dans un panneau à côté de la conversation. Tu l'installes une fois, tu l'allumes quand tu veux : ton travail avec Claude et ton activité à l'Ottho Academy font avancer ton builder.
 
 ## Installer
 
@@ -26,9 +26,8 @@ L'Academy branchée sur ton Claude, une fois pour tous tes projets, depuis Mon I
 
 ## Jouer
 
-1. Ouvre Claude Code dans ton projet.
-2. Tape `/quest` : le jeu s'active dans ce projet et s'ouvre. Il se rouvre ensuite à chaque session dans ce projet. Ailleurs, il ne s'affiche pas.
-3. Travaille avec Claude. Dans un projet activé, chaque journée rapporte :
+1. Dans n'importe quelle session Claude Code, tape `/quest` : le jeu s'allume et s'ouvre. Il se rouvre ensuite dans toutes tes sessions, quel que soit le projet.
+2. Travaille avec Claude. Jeu allumé, chaque journée rapporte :
 
 | Action | XP | Au plus par jour |
 | --- | --- | --- |
@@ -37,10 +36,10 @@ L'Academy branchée sur ton Claude, une fois pour tous tes projets, depuis Mon I
 | Commit enregistré | 8 | 3 |
 | Agent, skill ou outil lancé | 3 | 5 |
 
-4. L'onglet Chantiers liste les exercices pratiques de l'Academy : fais la tâche dans ton projet, puis « Faire vérifier ». Claude regarde ton travail, rend la preuve à l'Academy, et le butin se récupère dans le jeu.
-5. Tes leçons, quiz et lives de l'Academy rapportent aussi.
+3. L'onglet Chantiers liste les exercices pratiques de l'Academy : fais la tâche dans ton projet, puis « Faire vérifier ». Claude regarde ton travail, rend la preuve à l'Academy, et le butin se récupère dans le jeu.
+4. Tes leçons, quiz et lives de l'Academy rapportent aussi.
 
-`/quest pause` met le jeu en pause dans le projet, `/quest` le relance.
+`/quest pause` éteint le jeu partout : ton travail ne compte plus jusqu'au prochain `/quest`. Fermer le panneau le cache seulement, le jeu reste allumé.
 
 ## Ce que le mod lit
 

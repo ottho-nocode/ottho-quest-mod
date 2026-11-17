@@ -53,8 +53,9 @@ import { projectName, workFromTool } from './work'
 import type { Work } from './work'
 
 // Ottho Quest dans un panneau, à côté de la conversation : tout le jeu, sans
-// page web. Le joueur l'active projet par projet (/quest) : ailleurs, le mod ne
-// montre rien et ne lit rien. Dans un projet activé, son travail avec Claude
+// page web. Le joueur l'allume quand il veut (/quest), pour toutes ses sessions,
+// et l'éteint de même (/quest pause) : éteint, le mod ne montre rien et ne lit
+// rien. Allumé, son travail avec Claude, dans n'importe quel projet,
 // rapporte (demandes, fichiers, commits, agents et outils, plafonnés par jour),
 // en plus de l'activité et des chantiers lus par le connecteur de l'Academy déjà
 // branché sur son Claude. La partie est gardée sur ce poste, par compte. Le
@@ -67,10 +68,12 @@ const TITLE = 'Ottho Quest'
 const CONNECT_URL = 'https://academy.ottho.co/profile?tab=ia'
 
 /** Retenu d'une session à l'autre. */
-/** Les projets où le joueur a activé le jeu (leur racine). */
-const PROJECTS_KEY = 'projects'
-/** Le panneau fermé par le joueur, par projet. */
-const closedKey = (root: string) => `closed:${root}`
+/** Le jeu allumé par le joueur, pour toutes ses sessions. */
+const ENABLED_KEY = 'enabled'
+/** L'ancienne activation par projet (v0.2 et v0.3) : un projet activé vaut jeu allumé. */
+const LEGACY_PROJECTS_KEY = 'projects'
+/** Le panneau fermé par le joueur ; le jeu reste allumé. */
+const CLOSED_KEY = 'pane-closed'
 /** Le travail fait avant la première lecture du compte, encaissé dès qu'il est connu. */
 const PENDING_KEY = 'work-pending'
 const ACCOUNT_KEY = 'account'
@@ -214,31 +217,28 @@ function serial<T>(task: () => Promise<T>): Promise<T> {
   return run
 }
 
-// --- Projets activés ---
+// --- L'interrupteur du jeu ---
 
-async function activeProjects($: EngineInterface): Promise<string[]> {
-  const value = await $.store.get(PROJECTS_KEY)
-  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
+async function isEnabled($: EngineInterface): Promise<boolean> {
+  if ((await $.store.get(ENABLED_KEY)) === true) return true
+  const legacy = await $.store.get(LEGACY_PROJECTS_KEY)
+  if (Array.isArray(legacy) && legacy.length > 0) {
+    await $.store.set(ENABLED_KEY, true)
+    await $.store.delete(LEGACY_PROJECTS_KEY)
+    return true
+  }
+  return false
 }
 
-async function isActive($: EngineInterface, root: string): Promise<boolean> {
-  return (await activeProjects($)).includes(root)
-}
-
-async function setActive($: EngineInterface, root: string, active: boolean): Promise<void> {
-  const others = (await activeProjects($)).filter(r => r !== root)
-  await $.store.set(PROJECTS_KEY, active ? [...others, root].slice(-50) : others)
-}
-
-/** Active ou met en pause le jeu dans le projet de la session. */
-async function toggleProject($: EngineInterface, active: boolean): Promise<void> {
-  const root = await $.session.root()
-  await setActive($, root, active)
-  if (!active) {
+/** Allume ou éteint le jeu, pour toutes les sessions. */
+async function setEnabled($: EngineInterface, enabled: boolean): Promise<void> {
+  await $.store.set(ENABLED_KEY, enabled)
+  await $.store.delete(LEGACY_PROJECTS_KEY)
+  if (!enabled) {
     await $.ui.close({ id: PANE })
     return
   }
-  await $.store.delete(closedKey(root))
+  await $.store.delete(CLOSED_KEY)
   await syncAll($)
 }
 
@@ -415,10 +415,10 @@ async function claimPending($: EngineInterface, state: GameState): Promise<GameS
   return next
 }
 
-/** Encaisse une action du projet, si le jeu est activé dans ce projet. */
+/** Encaisse une action du projet, si le jeu est allumé. */
 async function recordWork($: EngineInterface, work: Work): Promise<void> {
+  if (!(await isEnabled($))) return
   const root = await $.session.root()
-  if (!(await isActive($, root))) return
   const at = new Date(await $.clock.now()).toISOString()
   const item: PendingWork = { ...work, at, project: projectName(root) }
   await serial(async () => {
@@ -506,15 +506,14 @@ function chantiersTip(b: Board, ready: boolean): string {
 }
 
 export const register: Register = on => {
-  // Hors d'un projet activé, le mod ne montre rien et ne lit rien.
+  // Éteint, le mod ne montre rien et ne lit rien.
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'quest',
-      description: 'Active Ottho Quest dans ce projet et ouvre le jeu (/quest pause le met en pause)',
+      description: 'Allume Ottho Quest dans toutes tes sessions et ouvre le jeu (/quest pause l\'éteint)',
     })
-    const root = await $.session.root()
-    if (await isActive($, root)) {
-      if ((await $.store.get(closedKey(root))) !== true) void $.ui.open({ id: PANE, title: TITLE })
+    if (await isEnabled($)) {
+      if ((await $.store.get(CLOSED_KEY)) !== true) void $.ui.open({ id: PANE, title: TITLE })
       void syncAll($).catch(() => undefined)
     }
 
@@ -522,27 +521,25 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'quest' }, async ($, e) => {
-    const root = await $.session.root()
-    const name = projectName(root)
     if (/^(pause|stop|off|arr[eê]t)/i.test(e.args.trim())) {
-      await toggleProject($, false)
-      return { text: `Ottho Quest est en pause dans ${name} : ton travail ici ne compte plus. /quest le relance.` }
+      await setEnabled($, false)
+      return { text: 'Ottho Quest est en pause : ton travail ne compte plus. /quest le relance.' }
     }
-    const was = await isActive($, root)
-    await setActive($, root, true)
-    await $.store.delete(closedKey(root))
+    const was = await isEnabled($)
+    await $.store.set(ENABLED_KEY, true)
+    await $.store.delete(CLOSED_KEY)
     await $.ui.open({ id: PANE, title: TITLE, focus: true })
     await syncAll($)
 
     return {
       text: was
         ? 'Ottho Quest ouvert.'
-        : `Ottho Quest est activé dans ${name} : ton travail ici avec Claude rapporte de l'XP.`,
+        : "Ottho Quest est allumé : ton travail avec Claude rapporte de l'XP, dans tous tes projets. /quest pause l'éteint.",
     }
   })
 
   on('ui.close', async ($, e, next) => {
-    if (e.id === PANE && e.origin.kind === 'person') await $.store.set(closedKey(await $.session.root()), true)
+    if (e.id === PANE && e.origin.kind === 'person') await $.store.set(CLOSED_KEY, true)
 
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -561,7 +558,7 @@ export const register: Register = on => {
     if (work) void recordWork($, work).catch(() => undefined)
     // Une preuve rendue, d'où qu'elle vienne (le bouton ou une demande tapée) :
     // le statut a changé dans l'Academy.
-    if (/^mcp__.+__submit_exercise$/.test(e.tool) && (await isActive($, await $.session.root()))) void syncAll($).catch(() => undefined)
+    if (/^mcp__.+__submit_exercise$/.test(e.tool) && (await isEnabled($))) void syncAll($).catch(() => undefined)
 
     return ran
   }).catch(($, e, next) => next(e))
@@ -588,9 +585,8 @@ export const register: Register = on => {
     const p = await read($, play)
     const b = await read($, board)
     const now = await $.clock.now()
-    const root = await $.session.root()
-    const active = await isActive($, root)
-    const projet = projectName(root)
+    const active = await isEnabled($)
+    const projet = projectName(await $.session.root())
     // Écrit par syncActivity et mutate : toujours un GameState du moteur.
     const game = p.game as GameState | null
 
@@ -681,18 +677,18 @@ export const register: Register = on => {
       />
     )
 
-    /** Le projet de la session : le jeu y est actif ou en pause. */
+    /** L'interrupteur du jeu, et le projet où le travail compte en ce moment. */
     const projectBar = (
       <Box key="projet" flexDirection="row" gap={1} alignItems="center" flexWrap="wrap">
         <Text color={active ? C.mint : C.dim}>
-          {active ? `Projet ${projet} · ton travail ici compte` : `Projet ${projet} · en pause`}
+          {active ? `Allumé · ton travail dans ${projet} compte` : 'En pause · ton travail ne compte pas'}
         </Text>
         <Button
-          key={active ? 'pause-projet' : 'activer-projet'}
+          key={active ? 'pause-jeu' : 'allumer-jeu'}
           dimColor
-          label={active ? 'Mettre en pause ici' : 'Activer ici'}
+          label={active ? 'Mettre en pause' : 'Allumer'}
           onPress={() => {
-            void toggleProject($, !active)
+            void setEnabled($, !active)
           }}
         />
       </Box>
@@ -773,7 +769,7 @@ export const register: Register = on => {
           {title("TON TRAVAIL AUJOURD'HUI")}
           <Box key="travail" flexDirection="column" borderStyle="round" borderColor={C.line} backgroundColor={C.plate} paddingX={1}>
             {!active && (
-              <Text color={C.dim}>En pause dans ce projet : « Activer ici » ou /quest, et ton travail y compte.</Text>
+              <Text color={C.dim}>En pause : « Allumer » ou /quest, et ton travail compte de nouveau.</Text>
             )}
             {PROJECT_RULES.map(rule => {
               const done = workCount(game, rule, today)
