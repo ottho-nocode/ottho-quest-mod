@@ -100,17 +100,31 @@ function resultText(ran: { text?: string; result?: unknown }): string {
 }
 
 /**
- * Appelle un outil du connecteur et rend son texte. D'abord par le connecteur ;
- * s'il refuse le nom trouvé, par l'outil lui-même, comme le modèle l'appellerait.
+ * Appelle un outil du connecteur et rend son texte.
+ *
+ * `consent` : le geste de la personne qui a lancé la lecture, tel qu'elle l'a
+ * fait (« The user pressed "Actualiser" ... »). L'appel passe alors par l'outil,
+ * avec ce geste, et la permission de la session juge comme pour une demande de
+ * la personne. Sans geste (lecture automatique), par le connecteur ; en mode
+ * auto, la permission peut la refuser : le panneau demande alors un clic.
  */
 export async function callAcademy(
   $: EngineInterface,
   name: string,
   tool: string,
   args: Record<string, unknown> = {},
+  consent?: string,
 ): Promise<string> {
   let text: string
   let isError: boolean
+  if (consent) {
+    const full = tools?.get(tool) ?? (`mcp__${name}__${tool}` as McpToolName)
+    const ran = await withTimeout($, $.tool.call({ tool: full, ...args, consent }), tool)
+    if (typeof ran.deny === 'string') throw new AcademyError(ran.deny)
+    text = resultText(ran)
+    if (ran.isError === true) throw new AcademyError(text || "L'Academy a refusé la demande")
+    return text
+  }
   try {
     const result = await withTimeout($, $.mcp.call(name, tool, args), tool)
     text = result.content.map(block => (block.type === 'text' ? block.text ?? '' : '')).join('')
@@ -125,4 +139,9 @@ export async function callAcademy(
   }
   if (isError) throw new AcademyError(text || "L'Academy a refusé la demande")
   return text
+}
+
+/** Le refus vient-il de la permission de la session (mode auto) plutôt que de l'Academy ? */
+export function isPermissionRefusal(message: string): boolean {
+  return /classifier|refused|denied|permission|not allowed/i.test(message)
 }

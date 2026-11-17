@@ -69,6 +69,10 @@ type Academy = {
   missingActivity?: boolean
   /** La racine du projet de la session. */
   root?: string
+  /** Le mode auto refuse les lectures lancées sans geste de la personne. */
+  refuseAuto?: boolean
+  /** La réponse aux autres outils (Write, Bash), comme la session les rendrait. */
+  other?: (e: { tool: string }) => unknown
 }
 
 /** Un faux connecteur Academy et un magasin en mémoire, lisible par le test. */
@@ -91,19 +95,39 @@ function setup(on: On, academy: Academy = {}) {
     ],
   }))
   on('mcp.connect', () => ({ value: NOT_LISTED }))
-  const asked: { tool: string; args: Record<string, unknown> }[] = []
+  const asked: { tool: string; args: Record<string, unknown>; consent?: string }[] = []
+  const REFUSAL = 'The server-side auto mode classifier gave no verdict: the request did not ask for one.'
+  const answer = (tool: string) =>
+    tool === 'list_my_exercises'
+      ? JSON.stringify(EXERCISES)
+      : tool === 'get_my_activity'
+        ? JSON.stringify({ user_id: ACCOUNT, events: EVENTS, more: false })
+        : ''
   on('mcp.call', (_, e) => {
     asked.push({ tool: e.tool, args: e.args })
+    if (academy.refuseAuto) throw new Error(`refused: ${REFUSAL}`)
     if (e.tool === 'get_my_activity' && academy.missingActivity) {
       return { value: { content: [{ type: 'text', text: 'Tool get_my_activity not found' }], isError: true } }
     }
-    const text =
-      e.tool === 'list_my_exercises'
-        ? JSON.stringify(EXERCISES)
-        : e.tool === 'get_my_activity'
-          ? JSON.stringify({ user_id: ACCOUNT, events: EVENTS, more: false })
-          : ''
-    return { value: { content: [{ type: 'text', text }], isError: false } }
+    return { value: { content: [{ type: 'text', text: answer(e.tool) }], isError: false } }
+  })
+  // Les lectures avec un geste de la personne passent par l'outil, comme le modèle l'appellerait.
+  on('tool.call', (_, e, next) => {
+    const found = /^mcp__.+__(list_my_exercises|get_my_activity)$/.exec(e.tool)
+    if (!found?.[1]) {
+      const other = academy.other?.(e)
+      return other === undefined ? next(e) : (other as Awaited<ReturnType<typeof next>>)
+    }
+    const { tool: _tool, consent, tool_use_id: _id, agentId: _agent, ...args } = e as Record<string, unknown>
+    const tool = found[1]
+    asked.push({ tool, args, consent: typeof consent === 'string' ? consent : undefined })
+    if (!consent && academy.refuseAuto) return { deny: REFUSAL }
+    if (tool === 'get_my_activity' && academy.missingActivity) {
+      const text = 'Tool get_my_activity not found'
+      return { result: [{ type: 'text', text }], text, isError: true }
+    }
+    const text = answer(tool)
+    return { result: [{ type: 'text', text }], text }
   })
   on('command.register', () => ({ value: { command: 'quest' } }))
   const opened: string[] = []
@@ -296,8 +320,7 @@ test("l'ancienne activation par projet vaut jeu allumé", async ($, on) => {
 })
 
 test('un fichier écrit dans le projet rapporte, une fois par fichier et par jour', async ($, on) => {
-  const { store } = setup(on)
-  on('tool.call', () => written(`${ROOT}/index.html`))
+  const { store } = setup(on, { other: e => (e.tool === 'Write' ? written(`${ROOT}/index.html`) : undefined) })
   await $.command.run(RUN)
   const before = saved(store)
   await $.tool.call({ tool: 'Write', file_path: `${ROOT}/index.html`, content: 'x' })
@@ -309,8 +332,12 @@ test('un fichier écrit dans le projet rapporte, une fois par fichier et par jou
 })
 
 test('un commit rapporte ; en pause, le travail ne compte plus', async ($, on) => {
-  const { store, toasts } = setup(on)
-  on('tool.call', () => ({ result: { stdout: '[main 1a2b3c4] Ajoute la page\n 1 file changed', stderr: '', interrupted: false } }))
+  const { store, toasts } = setup(on, {
+    other: e =>
+      e.tool === 'Bash'
+        ? { result: { stdout: '[main 1a2b3c4] Ajoute la page\n 1 file changed', stderr: '', interrupted: false } }
+        : undefined,
+  })
   await $.command.run(RUN)
   const before = saved(store).xp
   await $.tool.call({ tool: 'Bash', command: 'git commit -m "Ajoute la page"' })
@@ -340,9 +367,8 @@ test('les demandes à Claude paient jusqu\'au plafond du jour, pas celles d\'un 
 })
 
 test("le travail fait avant la lecture du compte est encaissé ensuite", async ($, on) => {
-  const { store } = setup(on)
+  const { store } = setup(on, { other: e => (e.tool === 'Write' ? written(`${ROOT}/README.md`) : undefined) })
   store.set('enabled', true)
-  on('tool.call', () => written(`${ROOT}/README.md`))
   await $.tool.call({ tool: 'Write', file_path: `${ROOT}/README.md`, content: 'x' })
   for (let i = 0; i < 50 && !store.has('work-pending'); i++) await tick()
   expect((store.get('work-pending') as unknown[]).length).toBe(1)
@@ -364,9 +390,12 @@ test('le panneau montre le projet et le travail du jour', async ($, on) => {
 })
 
 test("sans activité lisible, la partie démarre sur ce poste, puis le compte la reprend", async ($, on) => {
-  const academy: Academy = { tools: ['list_my_exercises', 'submit_exercise'], missingActivity: true }
+  const academy: Academy = {
+    tools: ['list_my_exercises', 'submit_exercise'],
+    missingActivity: true,
+    other: e => (e.tool === 'Write' ? written(`${ROOT}/index.html`) : undefined),
+  }
   const { store } = setup(on, academy)
-  on('tool.call', () => written(`${ROOT}/index.html`))
   await $.command.run(RUN)
   // Partie tenue sans compte : cadeau de départ, chantiers et travail du projet.
   expect(store.get('account')).toBe('local')
@@ -390,4 +419,21 @@ test('le nom long de la commande, que le menu de l\'app propose, allume aussi le
   expect((ran.text ?? '').includes('Ottho Quest est allumé')).toBe(true)
   expect(store.get('enabled')).toBe(true)
   expect(opened).toEqual(['ottho-quest'])
+})
+
+test("en mode auto, la lecture automatique refusée demande un clic, et /quest lit avec ce geste", async ($, on) => {
+  const { store, asked } = setup(on, { refuseAuto: true })
+  store.set('enabled', true)
+  await $.session.start(START)
+  for (let i = 0; i < 50 && store.get('account') === undefined; i++) await tick()
+  expect(store.get('account')).toBe('local')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await texts(ui)).some(t => t.startsWith("Ton Claude n'a pas lu ton Academy tout seul"))).toBe(true)
+  await ui.unmount()
+
+  await $.command.run(RUN)
+  expect(store.get('account')).toBe(ACCOUNT)
+  // La partie locale est reprise par le compte, avec ta validation à l'Academy.
+  expect((store.get(`save:${ACCOUNT}`) as { validated: string[] }).validated).toContain(CLAUDE_MD)
+  expect(asked.some(a => a.tool === 'get_my_activity' && a.consent === 'The user ran the /quest command')).toBe(true)
 })

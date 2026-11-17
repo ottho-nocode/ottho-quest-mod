@@ -1,6 +1,6 @@
 {
   "name": "ottho-quest",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Ottho Quest à côté de la conversation : allume le jeu quand tu veux avec /quest, ton travail avec Claude et ton activité Academy te font progresser",
   "types": "./types/index.d.ts"
 }

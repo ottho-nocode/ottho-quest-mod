@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Board, Chantier, ChantierStatus, Play, Tab } from '../types'
-import { AcademyError, callAcademy, findServer, forgetServer, hasTool } from './academy'
+import { AcademyError, callAcademy, findServer, forgetServer, hasTool, isPermissionRefusal } from './academy'
 import { BUILDERS, HEADS, SPRITES } from './art'
 import type { BuilderId, Picture } from './art'
 import {
@@ -97,6 +97,12 @@ const C = {
   danger: '#ff5a5a',
 }
 
+/** Les gestes de la personne qui lancent une lecture, décrits tels quels pour la permission. */
+const PRESSED = (label: string) => `The user pressed "${label}" in the Ottho Quest pane`
+const RAN_QUEST = 'The user ran the /quest command'
+
+const NEED_CLICK =
+  "Ton Claude n'a pas lu ton Academy tout seul : clique sur « Actualiser » pour qu'il la lise à ta demande."
 const NOT_CONNECTED =
   "L'Academy n'est pas branchée sur ce Claude, ou pas dans ce projet. Branche-la depuis Mon IA, puis actualise."
 const NO_ACTIVITY_TOOL =
@@ -231,7 +237,7 @@ async function isEnabled($: EngineInterface): Promise<boolean> {
 }
 
 /** Allume ou éteint le jeu, pour toutes les sessions. */
-async function setEnabled($: EngineInterface, enabled: boolean): Promise<void> {
+async function setEnabled($: EngineInterface, enabled: boolean, consent?: string): Promise<void> {
   await $.store.set(ENABLED_KEY, enabled)
   await $.store.delete(LEGACY_PROJECTS_KEY)
   if (!enabled) {
@@ -239,22 +245,34 @@ async function setEnabled($: EngineInterface, enabled: boolean): Promise<void> {
     return
   }
   await $.store.delete(CLOSED_KEY)
-  await syncAll($)
+  await syncAll($, consent)
 }
 
-/** Une lecture à la fois : deux appels rapprochés n'en font qu'une. */
+/**
+ * Une lecture à la fois : deux appels rapprochés n'en font qu'une. Une lecture
+ * demandée par un geste ne se fond pas dans une lecture automatique en cours :
+ * elle la suit, avec son geste.
+ */
 let syncing: Promise<void> | null = null
+let syncingWithConsent = false
 
-export function syncAll($: EngineInterface): Promise<void> {
-  if (!syncing) {
-    syncing = runSync($).finally(() => {
-      syncing = null
+export function syncAll($: EngineInterface, consent?: string): Promise<void> {
+  if (syncing && (syncingWithConsent || !consent)) return syncing
+  const before = syncing ? syncing.catch(() => undefined) : Promise.resolve()
+  const current: Promise<void> = before
+    .then(() => runSync($, consent))
+    .finally(() => {
+      if (syncing === current) {
+        syncing = null
+        syncingWithConsent = false
+      }
     })
-  }
-  return syncing
+  syncing = current
+  syncingWithConsent = consent !== undefined
+  return current
 }
 
-async function runSync($: EngineInterface): Promise<void> {
+async function runSync($: EngineInterface, consent?: string): Promise<void> {
   await update($, play, (p): Play => ({ ...p, phase: 'loading' }))
   await update($, board, (b): Board => ({ ...b, phase: 'loading' }))
   const name = await findServer($)
@@ -263,13 +281,14 @@ async function runSync($: EngineInterface): Promise<void> {
     await loadWithoutActivity($, NOT_CONNECTED)
     return
   }
-  await Promise.all([syncActivity($, name), syncChantiers($, name)])
+  await Promise.all([syncActivity($, name, consent), syncChantiers($, name, consent)])
 }
 
 /** Lit l'activité du compte, depuis la dernière lecture si le compte est connu. */
 async function readActivity(
   $: EngineInterface,
   name: string,
+  consent?: string,
 ): Promise<{ account: string; events: ActivityEvent[] }> {
   const stored = await $.store.get(ACCOUNT_KEY)
   const known = typeof stored === 'string' ? stored : null
@@ -278,7 +297,7 @@ async function readActivity(
   let account: string | null = null
   const events: ActivityEvent[] = []
   for (let page = 0; page < 20; page++) {
-    const answer = parseActivity(await callAcademy($, name, 'get_my_activity', since ? { since } : {}))
+    const answer = parseActivity(await callAcademy($, name, 'get_my_activity', since ? { since } : {}, consent))
     if (!answer) throw new Error("réponse de l'Academy illisible")
     if (account === null && since && answer.account !== known) {
       // Un autre compte que la dernière fois : tout relire pour celui-ci.
@@ -297,11 +316,11 @@ async function readActivity(
 }
 
 /** Encaisse l'activité nouvelle du compte, et charge sa partie. */
-async function syncActivity($: EngineInterface, name: string): Promise<void> {
+async function syncActivity($: EngineInterface, name: string, consent?: string): Promise<void> {
   // Même absent de la liste que la session a chargée, l'outil peut répondre :
   // le serveur est à jour avant que le Claude du joueur ne relise ses outils.
   try {
-    const { account, events } = await readActivity($, name)
+    const { account, events } = await readActivity($, name, consent)
     const { out, isNew } = await serial(async () => {
       const saved = await $.store.get(saveKey(account))
       const isNew = saved === undefined || saved === null
@@ -331,8 +350,12 @@ async function syncActivity($: EngineInterface, name: string): Promise<void> {
     const missing =
       hasTool('get_my_activity') === false ||
       (error instanceof AcademyError && /get_my_activity|unknown tool|not found|introuvable/i.test(text))
-    if (!(error instanceof AcademyError) && hasTool('get_my_activity') !== false) forgetServer()
-    await loadWithoutActivity($, missing ? NO_ACTIVITY_TOOL : `Lecture de ton activité impossible : ${text}`)
+    const refused = isPermissionRefusal(text)
+    if (!refused && !(error instanceof AcademyError) && hasTool('get_my_activity') !== false) forgetServer()
+    await loadWithoutActivity(
+      $,
+      refused ? NEED_CLICK : missing ? NO_ACTIVITY_TOOL : `Lecture de ton activité impossible : ${text}`,
+    )
   }
 }
 
@@ -358,15 +381,20 @@ async function loadWithoutActivity($: EngineInterface, message: string): Promise
   await update($, play, (p): Play => ({ ...p, account: state.account, game: state.next, phase: 'error', message }))
 }
 
-async function syncChantiers($: EngineInterface, name: string): Promise<void> {
+async function syncChantiers($: EngineInterface, name: string, consent?: string): Promise<void> {
   try {
-    const items = parseExercises(await callAcademy($, name, 'list_my_exercises'))
+    const items = parseExercises(await callAcademy($, name, 'list_my_exercises', {}, consent))
     if (!items) throw new Error("réponse de l'Academy illisible")
     await update($, board, (b): Board => ({ ...b, phase: 'ready', items, message: null }))
   } catch (error) {
-    if (!(error instanceof AcademyError)) forgetServer()
     const text = error instanceof Error ? error.message : String(error)
-    await update($, board, (b): Board => ({ ...b, phase: 'error', message: `Lecture des chantiers impossible : ${text}` }))
+    const refused = isPermissionRefusal(text)
+    if (!refused && !(error instanceof AcademyError)) forgetServer()
+    await update($, board, (b): Board => ({
+      ...b,
+      phase: 'error',
+      message: refused ? NEED_CLICK : `Lecture des chantiers impossible : ${text}`,
+    }))
   }
 }
 
@@ -532,7 +560,7 @@ export const register: Register = on => {
     await $.store.set(ENABLED_KEY, true)
     await $.store.delete(CLOSED_KEY)
     await $.ui.open({ id: PANE, title: TITLE, focus: true })
-    await syncAll($)
+    await syncAll($, RAN_QUEST)
 
     return {
       text: was
@@ -574,7 +602,7 @@ export const register: Register = on => {
     const b = await read($, board)
     if (b.checking) {
       await update($, board, (current): Board => ({ ...current, checking: null }))
-      void syncAll($).catch(() => undefined)
+      void syncAll($, PRESSED('Faire vérifier')).catch(() => undefined)
     }
 
     return next(e)
@@ -670,7 +698,7 @@ export const register: Register = on => {
         dimColor
         label={p.phase === 'loading' ? 'Lecture en cours' : 'Actualiser'}
         onPress={() => {
-          void syncAll($)
+          void syncAll($, PRESSED('Actualiser'))
             .then(async () => {
               const after = await read($, play)
               $.ui.toast(after.phase === 'ready' ? 'Ottho Quest est à jour' : 'Lecture terminée, voir le message')
@@ -691,7 +719,7 @@ export const register: Register = on => {
           dimColor
           label={active ? 'Mettre en pause' : 'Allumer'}
           onPress={() => {
-            void setEnabled($, !active)
+            void setEnabled($, !active, PRESSED('Allumer'))
           }}
         />
       </Box>

@@ -44,4 +44,4 @@ L'Academy branchée sur ton Claude, une fois pour tous tes projets, depuis Mon I
 ## Ce que le mod lit
 
 - Les appels d'outils de la conversation (le nom de l'outil, le chemin du fichier écrit, la sortie de `git commit`) pour compter ton travail. Jamais le contenu de tes fichiers, et rien n'est envoyé : ta partie reste sur ton ordinateur.
-- Ton activité et tes exercices à l'Academy, par le connecteur que tu as branché.
+- Ton activité et tes exercices à l'Academy, par le connecteur que tu as branché. En mode auto, Claude Code peut refuser une lecture que le mod lance seul : le panneau te demande alors de cliquer sur « Actualiser », et la lecture se fait à ta demande.
