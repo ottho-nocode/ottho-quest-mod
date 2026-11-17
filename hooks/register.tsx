@@ -520,7 +520,10 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: 'quest' }, async ($, e) => {
+  // /quest tout court (déclaré au démarrage) ou /ottho-quest:quest (le fichier
+  // commands/quest.md, que le menu de l'app propose avant le démarrage).
+  on('command.run', async ($, e, next) => {
+    if (e.command !== 'quest' && e.command !== 'ottho-quest:quest') return next(e)
     if (/^(pause|stop|off|arr[eê]t)/i.test(e.args.trim())) {
       await setEnabled($, false)
       return { text: 'Ottho Quest est en pause : ton travail ne compte plus. /quest le relance.' }
@@ -536,7 +539,7 @@ export const register: Register = on => {
         ? 'Ottho Quest ouvert.'
         : "Ottho Quest est allumé : ton travail avec Claude rapporte de l'XP, dans tous tes projets. /quest pause l'éteint.",
     }
-  })
+  }).catch(($, e, next) => next(e))
 
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE && e.origin.kind === 'person') await $.store.set(CLOSED_KEY, true)

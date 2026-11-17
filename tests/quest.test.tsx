@@ -383,3 +383,11 @@ test("sans activité lisible, la partie démarre sur ce poste, puis le compte la
   expect(saved(store).xp).toBe(73)
   expect(store.has('save:local')).toBe(false)
 })
+
+test('le nom long de la commande, que le menu de l\'app propose, allume aussi le jeu', async ($, on) => {
+  const { store, opened } = setup(on)
+  const ran = await $.command.run({ ...RUN, command: 'ottho-quest:quest' })
+  expect((ran.text ?? '').includes('Ottho Quest est allumé')).toBe(true)
+  expect(store.get('enabled')).toBe(true)
+  expect(opened).toEqual(['ottho-quest'])
+})
